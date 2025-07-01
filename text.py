@@ -7,12 +7,19 @@ from telegram import Update, BotCommand, ReplyKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 import asyncio
 import speech_recognition as sr
+import re
 try:
     from pydub import AudioSegment
 except ImportError:
     AudioSegment = None
     logging.warning('pydub is not installed. Voice to text conversion will not work. Install it with: pip install pydub')
 from datetime import datetime
+try:
+    from PIL import Image
+except ImportError:
+    Image = None
+    logging.warning('Pillow (PIL) is not installed. Image generation will not work. Install it with: pip install pillow')
+from io import BytesIO
 
 # កំណត់រចនាសម្ព័ន្ធការកាប់ឈើ
 # Configure logging
@@ -57,7 +64,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     # Button menu options
     menu_keyboard = [
-        # [ "Contact Admin"]  # New button row
+        [ "Contact Admin"]  # New button row
     ]
     reply_markup = ReplyKeyboardMarkup(menu_keyboard, resize_keyboard=True)
 
@@ -82,10 +89,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         '• /voice_to_text - ព័ត៌មានអំពីរបៀបផ្ញើសារជាសំឡេង។\n'
         '• /pdf_or_img - ព័ត៌មានអំពីរបៀបផ្ញើឯកសារ ឬរូបភាព។\n'
         '• /generate_code - បង្កើតកូដផ្អែកលើការពិពណ៌នារបស់អ្នក។\n'
+        '• /generate_image - បង្កើតរូបភាពផ្អែកលើការពិពណ៌នារបស់អ្នក។\n'
         '• /edit_last - កែសម្រួលសំណួរចុងក្រោយរបស់អ្នក។\n'
         '• /show_history - មើលប្រវត្តិជជែករបស់អ្នក។\n'
         '• /clear_history - លុបប្រវត្តិជជែករបស់អ្នក។'
-        '• /contact_admin - ទំនាក់ទំនងអេដមិន។'
     )
     await update.message.reply_text(welcome_message, reply_markup=reply_markup)
 
@@ -99,7 +106,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     logger.info(f"Received text message from {user_id}: {user_message}")
 
     # Handle Contact Admin button
-    if user_message.strip() == "contact_admin":
+    if user_message.strip() == "Contact Admin":
         await update.message.reply_text("ទំនាក់ទំនងអេដមិន៖ @kun_amra")
         return
 
@@ -115,6 +122,29 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     if user_bot_state.get(user_id) == 'awaiting_edited_question':
         await process_edited_question(update, context, user_message)
         user_bot_state[user_id] = None # Reset state after handling
+        return
+
+    # Check user state for image generation request
+    if user_bot_state.get(user_id) == 'awaiting_image_description':
+        user_bot_state[user_id] = None
+        if Image is None:
+            await update.message.reply_text('Pillow (PIL) មិនត្រូវបានដំឡើងទេ។ សូមដំឡើងវាជាមុនសិន៖ pip install pillow')
+            return
+        try:
+            thinking_message = await update.message.reply_text("KH AI V2 កំពុងបង្កើតរូបភាព... សូមរង់ចាំបន្តិច។")
+            image_bytes, caption = gemini_generate_image(user_message)
+            if image_bytes:
+                image = BytesIO(image_bytes)
+                image.seek(0)
+                await context.bot.send_photo(chat_id=update.effective_chat.id, photo=image)
+                if caption:
+                    await update.message.reply_text(f"Caption: {caption}")
+                await thinking_message.delete()
+            else:
+                await thinking_message.edit_text("សុំទោស មិនអាចបង្កើតរូបភាពបានទេ។")
+        except Exception as e:
+            logger.error(f"Error generating image: {e}", exc_info=True)
+            await update.message.reply_text("កំហុសក្នុងការបង្កើតរូបភាព។ សូមព្យាយាមម្តងទៀត។")
         return
 
     # បង្ហាញសារកំពុងគិតសម្រាប់សារជជែកធម្មតា។
@@ -503,6 +533,12 @@ async def process_edited_question(update: Update, context: ContextTypes.DEFAULT_
             'សូមព្យាយាមម្តងទៀតនៅពេលក្រោយ។'
         )
 
+# Helper function to escape Markdown special characters
+def escape_markdown(text: str) -> str:
+    # Telegram MarkdownV2 escaping
+    escape_chars = r'_*[]()~`>#+-=|{}.!'
+    return re.sub(r'([%s])' % re.escape(escape_chars), r'\\\1', text)
+
 # មុខងារសម្រាប់បង្ហាញប្រវត្តិជជែក
 # Function for displaying chat history
 async def show_history(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -513,6 +549,8 @@ async def show_history(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             role = "អ្នក" if entry["role"] == "user" else " KH AI V2 "
             content = " ".join([part["text"] for part in entry["parts"] if "text" in part])
             history_text += f"**{role}**: {content}\n\n"
+        # Escape Markdown special characters
+        history_text = escape_markdown(history_text)
         await send_long_message(update.message, history_text, parse_mode='Markdown')
     else:
         await update.message.reply_text('អ្នកមិនទាន់មានប្រវត្តិជជែកនៅឡើយទេ។')
@@ -549,10 +587,10 @@ async def set_telegram_commands(application: Application):
         BotCommand("voice_to_text", "បំប្លែងសំឡេងទៅជាអត្ថបទ"), # Convert voice to text
         BotCommand("pdf_or_img", "ព័ត៌មានរូបភាព/ឯកសារ PDF"), # Image/PDF info
         BotCommand("generate_code", "បង្កើតកូដ"), # Generate code
+        BotCommand("generate_image", "បង្កើតរូបភាព"),  # New image generation command
         BotCommand("edit_last", "កែសម្រួលសំណួរចុងក្រោយ"), # Edit last question
         BotCommand("show_history", "មើលប្រវត្តិជជែក"), # View chat history
-        BotCommand("clear_history", "លុបប្រវត្តិជជែក"), # Clear chat history
-        BotCommand("contact_admin", "ទំនាក់ទំនងអេដមិន") # Contact admin
+        BotCommand("clear_history", "លុបប្រវត្តិជជែក") # Clear chat history
     ]
     await application.bot.set_my_commands(commands)
     logger.info("Telegram commands set successfully.")
@@ -573,7 +611,6 @@ def main() -> None:
     application.add_handler(CommandHandler("edit_last", edit_last_question_command)) # Fixed: handler for editing last question
     application.add_handler(CommandHandler("show_history", show_history)) # New handler for showing history
     application.add_handler(CommandHandler("clear_history", clear_history)) # Handler for clearing history
-    application.add_handler(CommandHandler("contact_admin", contact_admin_command)) # Handler for contacting admin
 
     # អ្នកគ្រប់គ្រងសម្រាប់សារអត្ថបទដែលបានកែសម្រួល
     # Handler for edited text messages
@@ -704,10 +741,62 @@ async def send_long_message(message_obj, text, **kwargs):
     for i in range(0, len(text), max_len):
         await message_obj.reply_text(text[i:i+max_len], **kwargs)
 
-# Add this handler function for /contact_admin
-async def contact_admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Reply with the Telegram admin username."""
-    await update.message.reply_text("ទំនាក់ទំនងអេដមិន៖ @kun_amra")
+# Add user state for image generation
+# In user_bot_state: 'awaiting_image_description'
+
+# /generate_image command handler
+async def generate_image_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
+    user_bot_state[user_id] = 'awaiting_image_description'
+    await update.message.reply_text('សូមពិពណ៌នារូបភាពដែលអ្នកចង់បង្កើត។')
+
+# Handle image description reply
+async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
+    user_message = update.message.text
+    logger.info(f"Received text message from {user_id}: {user_message}")
+
+    # ... existing code ...
+    # Add this block before other state checks
+    if user_bot_state.get(user_id) == 'awaiting_image_description':
+        user_bot_state[user_id] = None
+        try:
+            thinking_message = await update.message.reply_text("KH AI V2 កំពុងបង្កើតរូបភាព... សូមរង់ចាំបន្តិច។")
+            image_bytes, caption = gemini_generate_image(user_message)
+            if image_bytes:
+                image = BytesIO(image_bytes)
+                image.seek(0)
+                await context.bot.send_photo(chat_id=update.effective_chat.id, photo=image)
+                if caption:
+                    await update.message.reply_text(f"Caption: {caption}")
+                await thinking_message.delete()
+            else:
+                await thinking_message.edit_text("សុំទោស មិនអាចបង្កើតរូបភាពបានទេ។")
+        except Exception as e:
+            logger.error(f"Error generating image: {e}", exc_info=True)
+            await update.message.reply_text("កំហុសក្នុងការបង្កើតរូបភាព។ សូមព្យាយាមម្តងទៀត។")
+        return
+    # ... rest of handle_text_message ...
+
+def gemini_generate_image(prompt: str):
+    """Generate an image and caption from a prompt using Gemini."""
+    try:
+        # Use the Gemini 1.5 Pro or Flash model for image generation
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        response = model.generate_content(prompt)
+        image_bytes = None
+        caption = None
+        # Try to extract image and caption from the response
+        if hasattr(response, 'candidates') and response.candidates:
+            for part in response.candidates[0].content.parts:
+                if hasattr(part, 'text') and part.text:
+                    caption = part.text.strip().replace('**Caption:** ', '')
+                elif hasattr(part, 'inline_data') and part.inline_data:
+                    image_bytes = part.inline_data.data
+        return image_bytes, caption
+    except Exception as e:
+        logger.error(f"Error in gemini_generate_image: {e}", exc_info=True)
+        return None, None
 
 if __name__ == "__main__":
     main()

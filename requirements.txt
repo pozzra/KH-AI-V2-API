@@ -1,5 +1,6 @@
-Flask
+
 python-telegram-bot==20.7
 google-generativeai
 PyPDF2
-google-cloud-speech 
+google-cloud-speech
+from google.cloud import speech 
